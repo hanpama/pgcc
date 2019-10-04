@@ -4,14 +4,14 @@ Relay Cursor Connection implementation for Golang and PostgresQL
 
 A connection contains its paginated edges and pagination info.
 
-* Cursors is a string which can uniquely specify the edge's position in the entire list.
+* A Cursor is a string which can uniquely identify the edge's position in the entire list.
 * Each edge has a node as its target, so the node ids are good to be cursors.
 
 
 ```
 town
 
-id        created
+id(pk)    created
 -------   ----------
 town-20   2019-09-06
 town-19   2019-09-05
@@ -24,10 +24,9 @@ town-13   2019-08-30
 ...
 ```
 
-When table `town` with `id` as its primary key is ordered by `created DESC`,
-You can use `id` as its cursor.
+When querying table `town` order by `created DESC`, You can use `id` as its cursor.
 
-Find first 5 edges after `town-19`?
+Let's find the first 5 edges after `town-19`.
 
 ```
 town
