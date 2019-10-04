@@ -60,7 +60,7 @@ How about 'backward pagination' using `last` and `before`?
 We are going to `ORDER` the rows `BY created ASC` but we should not reverse the order of edges in results.
 (https://facebook.github.io/relay/graphql/connections.htm#sec-Edge-order)
 
-For example, when we query last 3 edges beefore `town-4`:
+For example, when we query last 3 edges before `town-4`:
 
 ```
 town
