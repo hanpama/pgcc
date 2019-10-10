@@ -7,23 +7,28 @@ import (
 
 // PageInfo https://facebook.github.io/relay/graphql/connections.htm#sec-undefined.PageInfo
 type PageInfo struct {
-	HasNextPage     bool    `json:"has_next_page"`
-	HasPreviousPage bool    `json:"has_previous_page"`
-	StartCursor     *string `json:"start_cursor"`
-	EndCursor       *string `json:"end_cursor"`
+	HasNextPage     bool        `json:"has_next_page"`
+	HasPreviousPage bool        `json:"has_previous_page"`
+	StartCursor     interface{} `json:"start_cursor"`
+	EndCursor       interface{} `json:"end_cursor"`
+}
+
+// Receive implements Receiver
+func (pi *PageInfo) Receive() []interface{} {
+	return []interface{}{&pi.HasNextPage, &pi.HasPreviousPage, &pi.StartCursor, &pi.EndCursor}
 }
 
 // Options defines required and optional settings for building connection query
 type Options struct {
 	// Table to paginate
 	TableName string
+	// Columns To Select
+	Select string
 	// Column used for cursor
 	Cursor string
 	// Options for sorting the table
 	SortKeys []SortKey
 
-	// Additional expressions to select besides cursor
-	Select string
 	// Optional condition expression
 	Condition string
 	// Optional Join clause
@@ -46,107 +51,110 @@ func (sk SortKey) Name() string {
 // QueryBuilder builds query which paginates SQL query
 // with cursor and count parameters
 type QueryBuilder struct {
-	sqlConnection,
-	sqlTotalCount string
+	EdgesSQL,
+	PageInfoSQL,
+	TotalCountSQL string
 }
 
 // NewQueryBuilder creates a new QueryBuilder with given options
 func NewQueryBuilder(options Options) *QueryBuilder {
 	var qs QueryBuilder
 	var res bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&res, "Connection", options); err != nil {
+	if err := tmpl.ExecuteTemplate(&res, "Edges", options); err != nil {
 		panic(err)
 	}
-	qs.sqlConnection = res.String()
+	qs.EdgesSQL = res.String()
+
+	res.Reset()
+	if err := tmpl.ExecuteTemplate(&res, "PageInfo", options); err != nil {
+		panic(err)
+	}
+	qs.PageInfoSQL = res.String()
 
 	res.Reset()
 	if err := tmpl.ExecuteTemplate(&res, "TotalCount", options); err != nil {
 		panic(err)
 	}
-	qs.sqlTotalCount = res.String()
+	qs.TotalCountSQL = res.String()
 
 	return &qs
 }
 
-// Paginate creates a new PaginationQuery
-func (qb *QueryBuilder) Paginate() *PaginationQuery {
-	return &PaginationQuery{
-		qb.sqlConnection,
-		map[int]interface{}{0: nil, 1: nil, 2: nil, 3: nil},
-	}
+// Edges creates a new Query for edges
+func (qb *QueryBuilder) Edges(args Args) *Query {
+	return newQuery(qb.EdgesSQL, args)
+}
+
+// PageInfo creates a new Query for pageInfo
+func (qb *QueryBuilder) PageInfo(args Args) *Query {
+	return newQuery(qb.PageInfoSQL, args)
 }
 
 // TotalCount creates a new TotalCountQuery
-func (qb *QueryBuilder) TotalCount() *TotalCountQuery {
-	return &TotalCountQuery{qb.sqlTotalCount}
+func (qb *QueryBuilder) TotalCount(args Args) *Query {
+	return newQuery(qb.TotalCountSQL, args)
 }
 
-// PaginationQuery is for querying pages for connection
-type PaginationQuery struct {
+func newQuery(sql string, args []interface{}) *Query {
+	return &Query{sql, args}
+}
+
+// Query is for querying pages for connection
+type Query struct {
 	sql  string
-	args map[int]interface{}
+	args []interface{}
 }
 
 // SQL returns this query's SQL query as string
-func (q *PaginationQuery) SQL() string { return q.sql }
+func (q *Query) SQL() string { return q.sql }
 
 // Args returns bound arguments
-func (q *PaginationQuery) Args() (args []interface{}) {
-	for i := 0; true; i++ {
-		if arg, ok := q.args[i]; ok {
-			args = append(args, arg)
-		} else {
-			break
-		}
-	}
-	return args
-}
-
-// SetFirst sets the query's parameter `first` as given value
-func (q *PaginationQuery) SetFirst(count int32) { q.args[0] = count }
-
-// SetAfter sets the query's parameter `after` as given value
-func (q *PaginationQuery) SetAfter(cursor string) { q.args[1] = cursor }
-
-// SetLast sets the query's parameter `last` as given value
-func (q *PaginationQuery) SetLast(count int32) { q.args[2] = count }
-
-// SetBefore sets the query's parameter `before` as given value
-func (q *PaginationQuery) SetBefore(cursor string) { q.args[3] = cursor }
-
-// TotalCountQuery is for querying total count of all the edges it paginates
-type TotalCountQuery struct {
-	sql string
-}
-
-// SQL returns this query's SQL query as string
-func (q *TotalCountQuery) SQL() string { return q.sql }
-
-// Args returns bound arguments
-func (q *TotalCountQuery) Args() []interface{} { return nil }
+func (q *Query) Args() []interface{} { return q.args }
 
 var tmpl = template.Must(template.New("ConnectionTemplate").Parse(`
-{{- define "Connection" -}}
-WITH {{ template "afterAndBefore" . }}
-SELECT
-  json_build_object(
-		'edges', __edges__.result,
-		'has_next_page', ({{ template "hasNextPage" . }}),
-		'has_previous_page', ({{ template "hasPreviousPage" . }}),
-		'start_cursor', CAST(__edges__.result ->> 0 AS JSON) ->> 'cursor',
-		'end_cursor', CAST(__edges__.result ->> json_array_length(__edges__.result)-1 AS JSON) ->> 'cursor'
-	)
-FROM ({{ template "edges" . }}) __edges__
-{{- end -}}
-
 {{- define "TotalCount" -}}
+WITH {{template "params"}}, {{template "afterAndBefore" .}}
 SELECT count(*) FROM {{.TableName}} {{.Join}} WHERE {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
 {{- end -}}
 
+{{- define "Edges"}}
+WITH {{template "params"}}, {{template "afterAndBefore" .}}
+SELECT {{.Select}} FROM ({{template "edges" .}}) __edges__
+{{ end }}
+
 {{- define "edges" -}}
 WITH __forward_edges__ AS (
+	{{template "forwardEdges" .}}
+), __backward_edges__ AS (
+	{{template "backwardEdges" .}}
+)
+SELECT * FROM __forward_edges__
+UNION
+SELECT * FROM __backward_edges__
+ORDER BY {{range $i, $key := .SortKeys}}{{if $i}}, {{end}}{{$key.Name}} {{$key.Order -}}{{- end}}
+OFFSET (
+	CASE ($1 > 0 AND $3 > 0)
+		WHEN TRUE
+		THEN GREATEST(COALESCE(0 - $3 + (SELECT count(*) FROM __forward_edges__), 0), 0)
+		ELSE 0
+	END
+)
+{{- end -}}
+
+{{- define "PageInfo" -}}
+WITH {{template "params"}}, {{template "afterAndBefore" .}}, __edges__  AS (
+	{{ template "edges" .}}
+)
+SELECT
+	({{template "hasNextPage" .}}) AS has_next_page,
+	({{template "hasPreviousPage" .}}) AS has_previous_page,
+	(SELECT __cursor__ FROM __edges__ LIMIT 1) AS start_cursor,
+	(SELECT __cursor__ FROM __edges__ OFFSET (SELECT count(*) - 1 FROM __edges__) LIMIT 1) AS start_cursor
+{{ end -}}
+
+{{- define "forwardEdges" -}}
 	SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
-	WHERE NOT (($1 + 0) IS NULL AND ($3 + 0) IS NOT NULL)
+	WHERE NOT ($1 IS NULL AND $3 IS NOT NULL)
 		AND {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
 		AND CASE (SELECT TRUE FROM __after__)
 			WHEN TRUE THEN ({{template "afterPredicate" .}})
@@ -160,11 +168,13 @@ WITH __forward_edges__ AS (
 	ORDER BY
 		{{- range $i, $key := .SortKeys}}{{- if $i}}, {{end}}
 		{{$key.Name}} {{if eq $key.Order "ASC"}}ASC{{else}}DESC{{end}}
-		{{- end}}, {{.Cursor}} ASC
+		{{- end}}
 	LIMIT $1
-), __backward_edges__ AS (
+{{- end -}}
+
+{{- define "backwardEdges" -}}
 	SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
-	WHERE $1 + 0 IS NULL AND $3 > 0
+	WHERE $1 IS NULL AND $3 IS NOT NULL
 		AND {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
 		AND CASE (SELECT TRUE FROM __after__)
 			WHEN TRUE THEN ({{template "afterPredicate" .}})
@@ -178,96 +188,76 @@ WITH __forward_edges__ AS (
 	ORDER BY
 		{{- range $i, $key := .SortKeys}}{{- if $i}}, {{end}}
 		{{$key.Name}} {{if eq $key.Order "ASC"}}DESC{{else}}ASC{{end}}
-		{{- end}}, {{.Cursor}} DESC
+		{{- end}}
 	LIMIT $3
-)
-SELECT COALESCE(JSON_AGG(__edgerows__.result), '[]'::json) AS result FROM (
-	SELECT ROW_TO_JSON(__rawedges__.*) AS result FROM (
-		(SELECT __forward_edges__.* FROM __forward_edges__
-		OFFSET (
-			CASE ($1 > 0 AND $3 > 0)
-				WHEN TRUE
-				THEN GREATEST(COALESCE(0 - $3 + (SELECT count(*) FROM __forward_edges__), 0), 0)
-				ELSE 0
-			END
-		))
-		UNION
-		SELECT __backward_edges__.* FROM __backward_edges__
-		ORDER BY {{range $i, $key := .SortKeys}}{{if $i}}, {{end}}{{$key.Name}} {{$key.Order -}}{{- end}}, cursor ASC
-	) as __rawedges__
-) __edgerows__
 {{- end -}}
 
 {{- define "hasPreviousPage" -}}
-SELECT (
-	CASE
-		WHEN $3 > 0 then (
-			WITH __limit_or_more__ AS (
-				SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
-				WHERE {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
-					AND CASE (SELECT TRUE FROM __after__)
-						WHEN TRUE THEN ({{template "afterPredicate" .}})
-						ELSE TRUE
-					END
-					AND CASE (SELECT TRUE FROM __before__)
-						WHEN TRUE THEN ({{template "beforePredicate" .}})
-						ELSE TRUE
-					END
-				{{.GroupBy}} LIMIT $3 + 1
-			)
-			SELECT count(*) > $3 FROM __limit_or_more__
+CASE
+	WHEN $3 IS NOT NULL then (
+		WITH __limit_or_more__ AS (
+			SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
+			WHERE {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
+				AND CASE (SELECT TRUE FROM __after__)
+					WHEN TRUE THEN ({{template "afterPredicate" .}})
+					ELSE TRUE
+				END
+				AND CASE (SELECT TRUE FROM __before__)
+					WHEN TRUE THEN ({{template "beforePredicate" .}})
+					ELSE TRUE
+				END
+			{{.GroupBy}} LIMIT $3 + 1
 		)
-		WHEN $2 IS NOT NULL then (
-			WITH __zero_or_one__ AS (
-				SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
-				WHERE {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
-					AND CASE (SELECT TRUE FROM __after__)
-						WHEN TRUE THEN ({{template "beforeAfterPredicate" .}})
-						ELSE TRUE
-					END
-				{{.GroupBy}} LIMIT 1
-			)
-			SELECT COUNT(*) > 0 FROM __zero_or_one__
+		SELECT count(*) > $3 FROM __limit_or_more__
+	)
+	WHEN $2 IS NOT NULL then (
+		WITH __zero_or_one__ AS (
+			SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
+			WHERE {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
+				AND CASE (SELECT TRUE FROM __after__)
+					WHEN TRUE THEN ({{template "beforeAfterPredicate" .}})
+					ELSE TRUE
+				END
+			{{.GroupBy}} LIMIT 1
 		)
-		ELSE FALSE
-	END
-) AS result
+		SELECT COUNT(*) > 0 FROM __zero_or_one__
+	)
+	ELSE FALSE
+END
 {{- end -}}
 
 {{- define "hasNextPage" -}}
-SELECT (
-	CASE
-		WHEN $1 > 0 then (
-			WITH __limit_or_more__ AS (
-				SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
-				WHERE {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
-					AND CASE (SELECT TRUE FROM __after__)
-						WHEN TRUE THEN ({{template "afterPredicate" .}})
-						ELSE TRUE
-					END
-					AND CASE (SELECT TRUE FROM __before__)
-						WHEN TRUE THEN ({{template "beforePredicate" .}})
-						ELSE TRUE
-					END
-					{{.GroupBy}} LIMIT $1 + 1
-			)
-			SELECT count(*) > $1 FROM __limit_or_more__
+CASE
+	WHEN $1 IS NOT NULL then (
+		WITH __limit_or_more__ AS (
+			SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
+			WHERE {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
+				AND CASE (SELECT TRUE FROM __after__)
+					WHEN TRUE THEN ({{template "afterPredicate" .}})
+					ELSE TRUE
+				END
+				AND CASE (SELECT TRUE FROM __before__)
+					WHEN TRUE THEN ({{template "beforePredicate" .}})
+					ELSE TRUE
+				END
+				{{.GroupBy}} LIMIT $1 + 1
 		)
-		WHEN $4 IS NOT NULL then (
-			WITH __zero_or_one__ AS (
-				SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
-				WHERE {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
-					AND CASE (SELECT TRUE FROM __before__)
-						WHEN TRUE THEN ({{template "afterBeforePredicate" .}})
-						ELSE TRUE
-					END
-				{{.GroupBy}} LIMIT 1
-			)
-			SELECT COUNT(*) > 0 FROM __zero_or_one__
+		SELECT count(*) > $1 FROM __limit_or_more__
+	)
+	WHEN $4 IS NOT NULL then (
+		WITH __zero_or_one__ AS (
+			SELECT {{template "selections" .}} FROM {{.TableName}} {{.Join}}
+			WHERE {{if .Condition}}({{.Condition}}){{else}}TRUE{{end}}
+				AND CASE (SELECT TRUE FROM __before__)
+					WHEN TRUE THEN ({{template "afterBeforePredicate" .}})
+					ELSE TRUE
+				END
+			{{.GroupBy}} LIMIT 1
 		)
-		ELSE FALSE
-	END
-) AS result
+		SELECT COUNT(*) > 0 FROM __zero_or_one__
+	)
+	ELSE FALSE
+END
 {{- end -}}
 
 {{- define "afterPredicate"}}
@@ -275,7 +265,7 @@ SELECT (
 		{{- if $i}} OR ({{end -}}
 		{{- range $j, $key := $.SortKeys -}}
 		  {{- if ge $i $j -}}
-				{{- if $j}}AND {{end -}}
+				{{- if $j}} AND {{end -}}
 				{{- if gt $i $j}}
 					{{- $key.Select}} = (select {{$key.Name}} FROM __after__)
 				{{- else}}
@@ -291,7 +281,7 @@ SELECT (
 		{{- if $i}} OR ({{end -}}
 		{{- range $j, $key := $.SortKeys -}}
 		  {{- if ge $i $j -}}
-				{{- if $j}}AND {{end -}}
+				{{- if $j}} AND {{end -}}
 				{{- if gt $i $j}}
 					{{- $key.Select}} = (select {{$key.Name}} FROM __before__)
 				{{- else}}
@@ -307,7 +297,7 @@ SELECT (
 		{{- if $i}} OR ({{end -}}
 		{{- range $j, $key := $.SortKeys -}}
 		  {{- if ge $i $j -}}
-				{{- if $j}}AND {{end -}}
+				{{- if $j}} AND {{end -}}
 				{{- if gt $i $j}}
 					{{- $key.Select}} = (select {{$key.Name}} FROM __after__)
 				{{- else}}
@@ -323,7 +313,7 @@ SELECT (
 		{{- if $i}} OR ({{end -}}
 		{{- range $j, $key := $.SortKeys -}}
 		  {{- if ge $i $j -}}
-				{{- if $j}}AND {{end -}}
+				{{- if $j}} AND {{end -}}
 				{{- if gt $i $j}}
 					{{- $key.Select}} = (select {{$key.Name}} FROM __before__)
 				{{- else}}
@@ -335,7 +325,7 @@ SELECT (
 {{- end}}
 
 {{- define "selections" -}}
-{{range $i, $key := .SortKeys}}{{if $i}}, {{end}}{{$key.Select}} AS {{$key.Name}}{{end}}, {{.Cursor}} AS cursor{{if .Select}}, {{.Select}}{{end}}
+{{range $i, $key := .SortKeys}}{{if $i}}, {{end}}{{$key.Select}} AS {{$key.Name}}{{end}}, {{.Cursor}} AS __cursor__, {{.Select}}
 {{- end -}}
 
 {{- define "afterAndBefore" -}}
@@ -350,7 +340,7 @@ __after__ AS (
 
 {{- define "params" -}}
 __params__ AS (
-	SELECT $1::int, $2, $3::int, $4
+	SELECT $1::int, $3::int
 )
 {{- end -}}
 `))

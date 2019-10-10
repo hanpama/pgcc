@@ -2,91 +2,89 @@ package pgcc_test
 
 import (
 	"database/sql"
-	"encoding/json"
-	"fmt"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/hanpama/pgcc"
 	_ "github.com/lib/pq"
 )
 
 func TestQueryBuilder(t *testing.T) {
-	var err error
+
 	tx := initTx()
 	qb := pgcc.NewQueryBuilder(pgcc.Options{
-		TableName: "town_test", // Table to query
-		Cursor:    "id",        // should be a key in the table
-		Select:    "created",   // additional columns to select
+		TableName: "test_post",   // Table to query
+		Select:    "id, created", // columns to select
+		Cursor:    "id",          // primary key
 		SortKeys: []pgcc.SortKey{ // defines the sort orders for this connection
 			{Order: "DESC", Select: "created"},
 			{Order: "ASC", Select: "id"},
 		},
 	})
 
-	type townEdge struct {
-		Cursor  string `json:"cursor"`
-		Created string `json:"created"`
-	}
+	args := pgcc.NewArgs(nil, nil, nil, nil)
 
-	type townConnection struct {
-		pgcc.PageInfo
-		Edges []townEdge `json:"edges"`
-	}
-
-	q := qb.Paginate()
-	q.SetFirst(2)
-
-	var src townConnection
-	var b []byte
-	err = tx.QueryRow(q.SQL(), q.Args()...).Scan(&b)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = json.Unmarshal(b, &src)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(src.Edges) != 2 {
-		t.Fatal("Edges should have length of 2 when first two queried")
-	}
-
-	err = tx.Rollback()
+	var totalCount int
+	err := tx.QueryRow(qb.TotalCountSQL, args...).Scan(&totalCount)
 	if err != nil {
 		panic(err)
 	}
+	assertDeepEqual(t, totalCount, 200)
+
+	args.SetFirst(5)
+	edges := mustQueryEdges(tx, qb.EdgesSQL, args...)
+	testJSONSnapshot(t, "first-5-edges", edges)
+	pageInfo := mustQueryPageInfo(tx, qb.PageInfoSQL, args...)
+	testJSONSnapshot(t, "first-5-pageInfo", pageInfo)
+
+	args.SetAfter(196)
+	edges = mustQueryEdges(tx, qb.EdgesSQL, args...)
+	testJSONSnapshot(t, "first-5-after-196-edges", edges)
+
+	args = pgcc.NewArgs(nil, nil, nil, nil)
+	args.SetLast(10)
+	edges = mustQueryEdges(tx, qb.EdgesSQL, args...)
+	testJSONSnapshot(t, "last-10-edges", edges)
+
+	args.SetBefore(10)
+	edges = mustQueryEdges(tx, qb.EdgesSQL, args...)
+	testJSONSnapshot(t, "last-10-before-10-edges", edges)
+
 }
 
-func initTx() *sql.Tx {
-	db, err := sql.Open("postgres", os.Getenv("DB_URL"))
+func mustQueryEdges(tx *sql.Tx, sql string, args ...interface{}) (edges Edges) {
+	rows, err := tx.Query(sql, args...)
 	if err != nil {
 		panic(err)
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		panic(err)
-	}
-
-	_, err = tx.Exec(`
-		CREATE TABLE town_test (
-			id TEXT PRIMARY KEY,
-			created TIMESTAMPTZ NOT NULL
-		)
-	`)
-	if err != nil {
-		panic(err)
-	}
-	now := time.Now()
-	for i := 0; i < 200; i++ {
-		id := fmt.Sprintf("Town-%d", i)
-		created := now.Add(time.Duration(i) * time.Hour)
-		_, err = tx.Exec(`INSERT INTO town_test (id, created) VALUES ($1, $2)`, id, created)
+	for rows.Next() {
+		err = rows.Scan(edges.Receive()...)
 		if err != nil {
 			panic(err)
 		}
 	}
-	return tx
+	return edges
+}
+
+func mustQueryPageInfo(tx *sql.Tx, sql string, args ...interface{}) (pi pgcc.PageInfo) {
+	err := tx.QueryRow(sql, args...).Scan(pi.Receive()...)
+	if err != nil {
+		panic(err)
+	}
+	return pi
+}
+
+type Edge struct {
+	ID      int32  `json:"id"`
+	Created string `json:"created"`
+}
+
+func (e *Edge) Receive() []interface{} {
+	return []interface{}{&e.ID, &e.Created}
+}
+
+type Edges []Edge
+
+func (rs *Edges) Receive() []interface{} {
+	*rs = append(*rs, Edge{})
+	return (*rs)[len(*rs)-1].Receive()
 }
