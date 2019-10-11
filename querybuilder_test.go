@@ -65,7 +65,7 @@ func mustQueryEdges(tx *sql.Tx, sql string, args ...interface{}) (edges Edges) {
 	return edges
 }
 
-func mustQueryPageInfo(tx *sql.Tx, sql string, args ...interface{}) (pi pgcc.PageInfo) {
+func mustQueryPageInfo(tx *sql.Tx, sql string, args ...interface{}) (pi PageInfo) {
 	err := tx.QueryRow(sql, args...).Scan(pi.Receive()...)
 	if err != nil {
 		panic(err)
@@ -87,4 +87,17 @@ type Edges []Edge
 func (rs *Edges) Receive() []interface{} {
 	*rs = append(*rs, Edge{})
 	return (*rs)[len(*rs)-1].Receive()
+}
+
+// PageInfo https://facebook.github.io/relay/graphql/connections.htm#sec-undefined.PageInfo
+type PageInfo struct {
+	HasNextPage     bool        `json:"has_next_page"`
+	HasPreviousPage bool        `json:"has_previous_page"`
+	StartCursor     interface{} `json:"start_cursor"`
+	EndCursor       interface{} `json:"end_cursor"`
+}
+
+// Receive implements Receiver
+func (pi *PageInfo) Receive() []interface{} {
+	return []interface{}{&pi.HasNextPage, &pi.HasPreviousPage, &pi.StartCursor, &pi.EndCursor}
 }

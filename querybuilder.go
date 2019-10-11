@@ -5,19 +5,6 @@ import (
 	"text/template"
 )
 
-// PageInfo https://facebook.github.io/relay/graphql/connections.htm#sec-undefined.PageInfo
-type PageInfo struct {
-	HasNextPage     bool        `json:"has_next_page"`
-	HasPreviousPage bool        `json:"has_previous_page"`
-	StartCursor     interface{} `json:"start_cursor"`
-	EndCursor       interface{} `json:"end_cursor"`
-}
-
-// Receive implements Receiver
-func (pi *PageInfo) Receive() []interface{} {
-	return []interface{}{&pi.HasNextPage, &pi.HasPreviousPage, &pi.StartCursor, &pi.EndCursor}
-}
-
 // Options defines required and optional settings for building connection query
 type Options struct {
 	// Table to paginate
@@ -41,11 +28,6 @@ type Options struct {
 type SortKey struct {
 	Order  string
 	Select string
-}
-
-// Name is used as alias in SQL query
-func (sk SortKey) Name() string {
-	return `"` + sk.Select + "_" + sk.Order + `"`
 }
 
 // QueryBuilder builds query which paginates SQL query
@@ -81,17 +63,17 @@ func NewQueryBuilder(options Options) *QueryBuilder {
 }
 
 // Edges creates a new Query for edges
-func (qb *QueryBuilder) Edges(args Args) *Query {
+func (qb *QueryBuilder) Edges(args ...interface{}) *Query {
 	return newQuery(qb.EdgesSQL, args)
 }
 
 // PageInfo creates a new Query for pageInfo
-func (qb *QueryBuilder) PageInfo(args Args) *Query {
+func (qb *QueryBuilder) PageInfo(args ...interface{}) *Query {
 	return newQuery(qb.PageInfoSQL, args)
 }
 
 // TotalCount creates a new TotalCountQuery
-func (qb *QueryBuilder) TotalCount(args Args) *Query {
+func (qb *QueryBuilder) TotalCount(args ...interface{}) *Query {
 	return newQuery(qb.TotalCountSQL, args)
 }
 
@@ -131,7 +113,7 @@ WITH __forward_edges__ AS (
 SELECT * FROM __forward_edges__
 UNION
 SELECT * FROM __backward_edges__
-ORDER BY {{range $i, $key := .SortKeys}}{{if $i}}, {{end}}{{$key.Name}} {{$key.Order -}}{{- end}}
+ORDER BY {{range $i, $key := .SortKeys}}{{if $i}}, {{end}}__sortkey{{$i}}__ {{$key.Order -}}{{- end}}
 OFFSET (
 	CASE ($1 > 0 AND $3 > 0)
 		WHEN TRUE
@@ -167,7 +149,7 @@ SELECT
 	{{.GroupBy}}
 	ORDER BY
 		{{- range $i, $key := .SortKeys}}{{- if $i}}, {{end}}
-		{{$key.Name}} {{if eq $key.Order "ASC"}}ASC{{else}}DESC{{end}}
+		__sortkey{{$i}}__ {{if eq $key.Order "ASC"}}ASC{{else}}DESC{{end}}
 		{{- end}}
 	LIMIT $1
 {{- end -}}
@@ -187,7 +169,7 @@ SELECT
 	{{.GroupBy}}
 	ORDER BY
 		{{- range $i, $key := .SortKeys}}{{- if $i}}, {{end}}
-		{{$key.Name}} {{if eq $key.Order "ASC"}}DESC{{else}}ASC{{end}}
+		__sortkey{{$i}}__ {{if eq $key.Order "ASC"}}DESC{{else}}ASC{{end}}
 		{{- end}}
 	LIMIT $3
 {{- end -}}
@@ -267,9 +249,9 @@ END
 		  {{- if ge $i $j -}}
 				{{- if $j}} AND {{end -}}
 				{{- if gt $i $j}}
-					{{- $key.Select}} = (select {{$key.Name}} FROM __after__)
+					{{- $key.Select}} = (select __sortkey{{$j}}__ FROM __after__)
 				{{- else}}
-					{{- $key.Select}} {{if eq $key.Order "ASC"}}>{{else}}<{{end}} (select {{$key.Name}} FROM __after__)
+					{{- $key.Select}} {{if eq $key.Order "ASC"}}>{{else}}<{{end}} (select __sortkey{{$i}}__ FROM __after__)
 				{{- end}}
 			{{- end}}
 		{{- end}}{{if $i}}){{end}}
@@ -283,9 +265,9 @@ END
 		  {{- if ge $i $j -}}
 				{{- if $j}} AND {{end -}}
 				{{- if gt $i $j}}
-					{{- $key.Select}} = (select {{$key.Name}} FROM __before__)
+					{{- $key.Select}} = (select __sortkey{{$j}}__ FROM __before__)
 				{{- else}}
-					{{- $key.Select}} {{if eq $key.Order "ASC"}}<{{else}}>{{end}} (select {{$key.Name}} FROM __before__)
+					{{- $key.Select}} {{if eq $key.Order "ASC"}}<{{else}}>{{end}} (select __sortkey{{$i}}__ FROM __before__)
 				{{- end}}
 			{{- end}}
 		{{- end}}{{if $i}}){{end}}
@@ -299,9 +281,9 @@ END
 		  {{- if ge $i $j -}}
 				{{- if $j}} AND {{end -}}
 				{{- if gt $i $j}}
-					{{- $key.Select}} = (select {{$key.Name}} FROM __after__)
+					{{- $key.Select}} = (select __sortkey{{$j}}__ FROM __after__)
 				{{- else}}
-					{{- $key.Select}} {{if eq $key.Order "ASC"}}<{{else}}>{{end}} (select {{$key.Name}} FROM __after__)
+					{{- $key.Select}} {{if eq $key.Order "ASC"}}<{{else}}>{{end}} (select __sortkey{{$i}}__ FROM __after__)
 				{{- end}}
 			{{- end}}
 		{{- end}}{{if $i}}){{end}}
@@ -315,9 +297,9 @@ END
 		  {{- if ge $i $j -}}
 				{{- if $j}} AND {{end -}}
 				{{- if gt $i $j}}
-					{{- $key.Select}} = (select {{$key.Name}} FROM __before__)
+					{{- $key.Select}} = (select __sortkey{{$j}}__ FROM __before__)
 				{{- else}}
-					{{- $key.Select}} {{if eq $key.Order "ASC"}}>{{else}}<{{end}} (select {{$key.Name}} FROM __before__)
+					{{- $key.Select}} {{if eq $key.Order "ASC"}}>{{else}}<{{end}} (select __sortkey{{$i}}__ FROM __before__)
 				{{- end}}
 			{{- end}}
 		{{- end}}{{if $i}}){{end}}
@@ -325,7 +307,7 @@ END
 {{- end}}
 
 {{- define "selections" -}}
-{{range $i, $key := .SortKeys}}{{if $i}}, {{end}}{{$key.Select}} AS {{$key.Name}}{{end}}, {{.Cursor}} AS __cursor__, {{.Select}}
+{{range $i, $key := .SortKeys}}{{if $i}}, {{end}}{{$key.Select}} AS __sortkey{{$i}}__{{end}}, {{.Cursor}} AS __cursor__, {{.Select}}
 {{- end -}}
 
 {{- define "afterAndBefore" -}}
